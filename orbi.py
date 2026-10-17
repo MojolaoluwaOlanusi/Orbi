@@ -158,7 +158,7 @@ IS_LINUX = sys.platform.startswith("linux")
 CLI_COMMANDS = {
     "pass", "fail", "build-start", "build-done", "build-fail",
     "say", "wake", "sleep", "celebrate", "quit", "dnd",
-    "status", "focus", "relax",
+    "status", "focus", "relax", "love", "think", "alert", "bored"
 }
 
 
@@ -1021,12 +1021,32 @@ class Sounds:
         if kind not in SOUND_NOTES:
             return
         try:
-            import winsound
             if kind not in self._cache:
                 self._cache[kind] = make_wav(SOUND_NOTES[kind], vol=self._volume)
-            winsound.PlaySound(
-                self._cache[kind], winsound.SND_MEMORY | winsound.SND_ASYNC
-            )
+            data = self._cache[kind]
+        except Exception:
+            logging.exception("sound synthesis failed for %s", kind)
+            return
+
+        # winsound refuses SND_MEMORY | SND_ASYNC. SND_MEMORY requires
+        # SND_SYNC, which blocks. So we run the blocking play on a
+        # throwaway daemon thread and return immediately.
+        t = threading.Thread(
+            target=self._play_blocking,
+            args=(kind, data),
+            daemon=True,
+        )
+        t.start()
+
+    @staticmethod
+    def _play_blocking(kind: str, data: bytes) -> None:
+        try:
+            import winsound
+            # Note: winsound has no SND_SYNC constant. Omitting SND_ASYNC
+            # IS the synchronous mode. Passing SND_MEMORY alone means
+            # "play these bytes, block until done". We run it on a daemon
+            # thread so the UI never stalls.
+            winsound.PlaySound(data, winsound.SND_MEMORY | winsound.SND_NODEFAULT)
         except Exception:
             logging.exception("sound playback failed for %s", kind)
 
@@ -5376,6 +5396,18 @@ class OrbiApp:
                 self.sounds.play("happy")
             else:
                 self.say("Build done.", 2.5)
+        elif cmd == "love":
+            if not self.sleep:
+                self.sim.love(arg or None, 3.0)
+        elif cmd == "think":
+            if not self.asleep:
+                self.sim.begin_think(dur=5.0)
+        elif cmd =="alert":
+            if not self.asleep:
+                self.sim.set_mood("alert", 2.5)
+        elif cmd == 'bored':
+            if not self.asleep:
+                self.sim.set_mood("bored", 4.0)
 
     # ------------------------------------------------------------------
     # sleep / wake

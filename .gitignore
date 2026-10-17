@@ -1,0 +1,55 @@
+# ============================================================================
+# Orbi — git ignore rules
+# ============================================================================
+
+# --- Build artifacts ---------------------------------------------------------
+# PyInstaller output. The exe ships as a Release asset, not in the repo.
+Orbi/
+build/
+dist/
+*.spec
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Packaging ---------------------------------------------------------------
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# --- Editor / IDE ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+*.sublime-project
+*.sublime-workspace
+
+# --- OS cruft ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Runtime / user data -----------------------------------------------------
+# Orbi writes these to %APPDATA%\Orbi, but if you ever run him locally
+# from the repo folder they can appear here.
+config.json
+stats.json
+achievements.json
+orbi.log
+duck-chat.log
+plugins/
