@@ -82,6 +82,7 @@ echo [4/4] Building Orbi.exe (this takes 1-3 minutes on first run)...
     --noconfirm ^
     --clean ^
     --windowed ^
+    --icon "%HERE%\orbi.ico" ^
     --name Orbi ^
     --distpath "%HERE%" ^
     --workpath "%HERE%\build" ^

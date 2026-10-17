@@ -7,7 +7,6 @@ Orbi is a small, frameless, always-on-top desktop companion written in Python. H
 **He is fully offline.** No AI, no cloud, no telemetry, no microphone. He just sits there and keeps you company.
 
 ![Orbi Demo](docs/preview.gif)
-*(Replace this with a GIF of Orbi rolling and reacting!)*
 
 ## Features
 
