@@ -24,7 +24,7 @@ Orbi is a small, frameless, always-on-top desktop companion written in Python. H
 
 You do not need Python installed to run Orbi.
 
-1. Go to the [Releases](https://github.com/YOUR_USERNAME/orbi/releases) page.
+1. Go to the [Releases](https://github.com/MojolaoluwaOlanusi/orbi/releases) page.
 2. Download the latest `Orbi-vX.X.X-windows.zip` file.
 3. Unzip the folder anywhere on your computer.
 4. Run `Orbi.exe`.
