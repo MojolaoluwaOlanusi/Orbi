@@ -28,6 +28,7 @@ You do not need Python installed to run Orbi.
 2. Download the latest `Orbi-vX.X.X-windows.zip` file.
 3. Unzip the folder anywhere on your computer.
 4. Run `Orbi.exe`.
+If Windows says "Windows protected your PC", click More info -> Run anyway. It's not signed yet.
 
 **To make him start automatically:**
 Right-click the little robot -> **Settings** -> **System** tab -> check **"Start with Windows"**.
