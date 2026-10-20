@@ -53,3 +53,12 @@ achievements.json
 orbi.log
 duck-chat.log
 plugins/
+
+# --- Packaging / Archives ----------------------------------------------------
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# --- AI Models ---
+model/

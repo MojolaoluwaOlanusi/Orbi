@@ -158,7 +158,7 @@ IS_LINUX = sys.platform.startswith("linux")
 CLI_COMMANDS = {
     "pass", "fail", "build-start", "build-done", "build-fail",
     "say", "wake", "sleep", "celebrate", "quit", "dnd",
-    "status", "focus", "relax", "love", "think", "alert", "bored"
+    "status", "focus", "relax", "mood"
 }
 
 
@@ -632,10 +632,13 @@ def foreground_info() -> Optional[Dict[str, Any]]:
         if not ok:
             _u32.GetWindowRect(hwnd, ctypes.byref(rect))
 
+        input_rect = find_input_field(hwnd) if IS_WIN else None
+
         return {
             "title": title.value,
             "exe": _process_name(pid.value),
             "rect": (rect.left, rect.top, rect.right, rect.bottom),
+            "input_rect": input_rect,
             "zoomed": bool(_u32.IsZoomed(hwnd)),
             "hwnd": int(hwnd),
         }
@@ -792,7 +795,29 @@ def enumerate_monitors() -> List[Tuple[int, int, int, int]]:
         except Exception:
             pass
 
-    return monitors
+    return 
+    
+def find_input_field(hwnd):
+        """Finds the largest Edit/RichEdit control in a window."""
+        best_rect = None
+        best_area = 0
+        def enum_child(child_hwnd, lparam):
+            nonlocal best_rect, best_area
+            cls = ctypes.create_unicode_buffer(256)
+            _u32.GetClassNameW(child_hwnd, cls, 256)
+            if cls.value in ("Edit", "RichEdit20W", "RichEditD2DPT", "Chrome_RenderWidgetHostHWND"):
+                rect = wt.RECT()
+                _u32.GetWindowRect(child_hwnd, ctypes.byref(rect))
+                w = rect.right - rect.left
+                h = rect.bottom - rect.top
+                area = w * h
+                if area > best_area and w > 150 and h > 15:
+                    best_area = area
+                    best_rect = (rect.left, rect.top, rect.right)
+            return True
+        ENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+        _u32.EnumChildWindows(hwnd, ENUMPROC(enum_child), 0)
+        return best_rect
 
 
 # --- global hotkey ----------------------------------------------------------
@@ -1627,6 +1652,14 @@ THEMES: Dict[str, Dict[str, Any]] = {
         "dome_hi": (245, 245, 245), "dome_mid": (200, 200, 200), "dome_lo": (130, 130, 130),
         "bg": (20, 20, 20), "fg": (230, 230, 230),
     },
+    "custom": {
+        "label": "Custom Color",
+        "orange": (238, 118, 34), # This gets overwritten by the app
+        "dark": (52, 56, 64), "silver": (176, 176, 186), "light": (226, 226, 232),
+        "body_hi": (255, 255, 255), "body_mid": (233, 229, 218), "body_lo": (168, 162, 150),
+        "dome_hi": (255, 255, 255), "dome_mid": (228, 225, 216), "dome_lo": (160, 156, 148),
+        "bg": (31, 36, 48), "fg": (230, 233, 242),
+    },
 }
 
 
@@ -1878,6 +1911,7 @@ class Sim:
         # --- perch tracking ----------------------------------------------
         self.perch_key: Optional[Tuple[int, ...]] = None
         self.perch_since: float = 0.0
+        self.active_perch: Optional[Tuple[int, int, int]] = None  # ← ADD THIS
 
         # --- typing rhythm -----------------------------------------------
         # A tiny "typing intensity" estimator. Rises when idle_seconds
@@ -2095,12 +2129,16 @@ class Sim:
         l, t, r, b = self.work
         nx = min(max(x, l + self.R), r - self.R)
         ny = min(y, b)
-        # smoothed velocity so releasing feels right
+        # Calculate velocity based on the drag speed
         self.vx = 0.6 * self.vx + 0.4 * (nx - self.x) / max(self._dt, 0.016)
+        self.vy = 0.6 * self.vy + 0.4 * (ny - self.y) / max(self._dt, 0.016)
         self.x, self.y = nx, ny
 
     def end_drag(self) -> None:
-        self.mode, self.vy = "fall", 0.0
+        self.mode = "fall"
+        # Cap the throw speed so he doesn't fly off screen at warp speed
+        self.vx = max(-1500, min(1500, self.vx))
+        self.vy = max(-1500, min(1500, self.vy))
 
     # ------------------------------------------------------------------
     # internal: rolling
@@ -2152,6 +2190,9 @@ class Sim:
                 q["vy"] += 400 * dt
                 q["r"] += q["vr"] * dt
                 q["vx"] *= 0.97
+            elif k == "r":
+                q["vx"] *= 0.9
+                q["vy"] += 300 * dt  # accelerate downward
             elif k == "d":
                 q["vy"] -= 30 * dt
                 q["vx"] *= 0.96
@@ -2182,6 +2223,32 @@ class Sim:
                 self.blink = math.sin(math.pi * self.blink_phase)
 
     def _resolve_perch(self, env: Env) -> Optional[Tuple[int, int, int]]:
+        if not self.perch_enabled:
+            return None
+
+        if env.perch is None:
+            # Debounce dropping to the floor for 0.5s to prevent flickering during Alt-Tab
+            if self.t - self.perch_since > 0.5:
+                self.active_perch = None
+                self.perch_key = None
+            return self.active_perch
+
+        key = tuple(int(v / 4) for v in env.perch)
+        pl, pt, pr = env.perch
+
+        # Check if the window is large enough to sit on
+        if pt - env.work[1] < self.total_h + 70 or pr - pl < 4 * self.R:
+            return self.active_perch
+
+        if key != self.perch_key:
+            # New window detected! Update immediately.
+            self.perch_key = key
+            self.perch_since = self.t
+            self.active_perch = env.perch
+            return self.active_perch
+
+        self.active_perch = env.perch
+        return self.active_perch
         # Debounce perch changes so a jittery foreground window doesn't
         # cause Orbi to hop every frame.
         key = None if env.perch is None else tuple(int(v / 4) for v in env.perch)
@@ -2193,14 +2260,19 @@ class Sim:
 
     def _start_hop(self, tx: float, ty: float) -> None:
         dist = math.hypot(tx - self.x, ty - self.y)
+        # Rocket jump ONLY if going UP (ty is less than y in screen coords)
+        rocket = (self.y - ty) > 100
+        
         self.hop = {
             "sx": self.x, "sy": self.y, "tx": tx, "ty": ty,
             "t0": self.t,
-            "dur": 0.5 + min(0.6, dist / 1500.0),
-            "arc": 60 * self.s + min(140 * self.s, abs(ty - self.y) * 0.25),
+            "dur": (0.25 if rocket else 0.45) + min(0.4, dist / 1500.0),
+            # Arc UP only for rockets. If going down, arc is 0.
+            "arc": (100 * self.s) if rocket else 0,
+            "rocket": rocket,
         }
         self.mode, self.vx = "hop", 0.0
-        self.squash_v -= 3.0
+        self.squash_v -= (8.0 if rocket else 3.0)
 
     def _update_hop(self) -> None:
         h = self.hop
@@ -2217,6 +2289,34 @@ class Sim:
             self.bounce = 0.5
             self.squash_v += 6.0
             return
+            
+        e = p * p * (3 - 2 * p)
+        nx = h["sx"] + (h["tx"] - h["sx"]) * e
+        self.y = h["sy"] + (h["ty"] - h["sy"]) * e
+        
+        # Only do the up-arc if it's a rocket
+        if h["arc"] > 0:
+            self.hop_h = h["arc"] * math.sin(math.pi * p)
+        else:
+            self.hop_h = 0.0
+            
+        self._roll(nx - self.x)
+        self.x = nx
+        h = self.hop
+        if h is None:
+            self.mode = "ground"
+            return
+        p = (self.t - h["t0"]) / h["dur"]
+        if p >= 1.0:
+            self.x, self.y = h["tx"], h["ty"]
+            self.ground = self.y
+            self.hop = None
+            self.hop_h = 0.0
+            self.mode = "ground"
+            self.bounce = 0.5
+            self.squash_v += 6.0  # Squash on landing
+            return
+            
         e = p * p * (3 - 2 * p)  # smoothstep
         nx = h["sx"] + (h["tx"] - h["sx"]) * e
         self.y = h["sy"] + (h["ty"] - h["sy"]) * e
@@ -2224,10 +2324,35 @@ class Sim:
         self._roll(nx - self.x)
         self.x = nx
 
+        # --- Rocket Fire Trail ---
+        if h.get("rocket"):
+            self.trail_cd -= self._dt
+            if self.trail_cd <= 0:
+                self.trail_cd = 0.02
+                self.particles.append({
+                    "k": "r",  # 'r' for rocket
+                    "x": self.x + random.uniform(-0.3, 0.3) * self.R,
+                    "y": self.y,
+                    "vx": random.uniform(-30, 30),
+                    "vy": random.uniform(100, 300),  # Shoot downward
+                    "life": 0.35, "l0": 0.35,
+                    "r": random.uniform(2.0, 4.0) * self.s,
+                })
+
     def _update_fall(self, dt: float, env: Env) -> None:
         l, t_, r, b = env.work
         self.vy += 1900 * self.s * dt
-        self.x = min(max(self.x + self.vx * dt, l + self.R), r - self.R)
+        self.x += self.vx * dt
+        
+        # Wall bounce logic
+        if self.x < l + self.R:
+            self.x = l + self.R
+            self.vx = abs(self.vx) * 0.7  # bounce right
+            self.squash_v -= 2.0
+        elif self.x > r - self.R:
+            self.x = r - self.R
+            self.vx = -abs(self.vx) * 0.7 # bounce left
+            self.squash_v -= 2.0
         self.vx *= 0.98
         if self.y > b + 2:
             self.y = b
@@ -2278,6 +2403,7 @@ class Sim:
 
         diff = desired - self.ground
         if abs(diff) > 6:
+            # ROCKET JUMP: Increase arc and speed if the target is far away
             self._start_hop(min(max(self.x, lo), hi), desired)
             return
         if diff:
@@ -2393,6 +2519,9 @@ class Sim:
             target += math.sin(self.t * 10) * 0.08
         elif mood == "bored":
             target += math.sin(self.t * 0.7) * 0.04
+        elif self.dancing:
+            # Bob head to the beat
+            target += math.sin(self.t * 8.0) * 0.15
 
         # typing sway: subtle head bob that follows typing energy
         target += self.typing_energy * math.sin(self.t * 22.0) * 0.05
@@ -2402,7 +2531,12 @@ class Sim:
         self.tilt += self.tilt_v * dt
 
         # spring antenna
-        target_ant = max(-1.0, min(1.0, self.vx / (170 * s)))
+        if self.mode == "hop" and self.hop and self.hop.get("rocket"):
+            # Antennas blow back during ascent
+            target_ant = -0.8 if self.hop["ty"] < self.hop["sy"] else 0.8
+        else:
+            target_ant = max(-1.0, min(1.0, self.vx / (170 * s)))
+            
         aa = (target_ant - self.ant) * 220.0 - self.ant_v * 14.0
         self.ant_v += aa * dt
         self.ant += self.ant_v * dt
@@ -2713,6 +2847,14 @@ class OrbiWindow(QWidget):
         # breathing animation even if the tick rate is uneven.
         self._last_hit_update: float = 0.0
 
+        # --- perch tracking ----------------------------------------------
+        self.perch_key: Optional[Tuple[int, ...]] = None
+        self.perch_since: float = 0.0
+        self.active_perch: Optional[Tuple[int, int, int]] = None  # <-- ADD THIS
+
+        self.dancing = False
+        self.setAcceptDrops(True)
+
         self.apply_scale()
 
     # ------------------------------------------------------------------
@@ -2811,8 +2953,16 @@ class OrbiWindow(QWidget):
         sim = self.sim
         R = sim.R
         lx = sim.x - self.ox
-        gy = sim.y - self.oy
-        lift = sim.hop_h + sim.bounce_px()
+        
+        # The shadow always stays at the ground level he started from.
+        gy = sim.ground - self.oy
+        
+        # Calculate lift based on distance from the ground
+        if sim.mode == "drag":
+            lift = max(0.0, sim.ground - sim.y)
+        else:
+            lift = abs(sim.ground - sim.y) + sim.bounce_px()
+
         breathe = sim.breathing_offset()
         cy = gy - R - lift + breathe
 
@@ -2849,8 +2999,8 @@ class OrbiWindow(QWidget):
         # 10. speech bubble
         self._draw_bubble(p, lx, head_top)
 
-        # 11. tint
-        self._draw_tint(p)
+        # 11. tint (disabled — was painting a rect over the whole widget)
+        # self._draw_tint(p)
 
         p.end()
 
@@ -3106,6 +3256,8 @@ class OrbiWindow(QWidget):
                 self._draw_star(p, q, px, py, a)
             elif kind == "h":
                 self._draw_heart(p, q, px, py, a)
+            elif kind == "r":
+                self._draw_rocket_fire(p, q, px, py, a)
             else:
                 self._draw_dust(p, q, px, py, a)
 
@@ -3145,6 +3297,24 @@ class OrbiWindow(QWidget):
         # Inner lighter heart
         p.setBrush(QColor(255, 160, 190, 200))
         p.drawPolygon(_poly(px, py, heart_points(6 * max(0.8, self.sim.s))))
+        p.restore()
+
+    def _draw_rocket_fire(self, p: QPainter, q: Dict[str, Any],
+                          px: float, py: float, a: float) -> None:
+        p.save()
+        p.setOpacity(a * 0.9)
+        p.setPen(Qt.PenStyle.NoPen)
+        
+        size = q.get("r", 3.0) * self.sim.s
+        
+        # Outer flame (orange)
+        p.setBrush(QColor(255, 120, 20, 200))
+        p.drawEllipse(QPointF(px, py + size), size * 1.5, size * 2.5)
+        
+        # Inner flame (yellow/white)
+        p.setBrush(QColor(255, 240, 100, 255))
+        p.drawEllipse(QPointF(px, py + size * 0.5), size * 0.7, size * 1.5)
+        
         p.restore()
 
     def _draw_dust(self, p: QPainter, q: Dict[str, Any],
@@ -3528,6 +3698,27 @@ class OrbiWindow(QWidget):
             60 * 16,
         )
         p.restore()
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:
+        for url in event.mimeData().urls():
+            filepath = url.toLocalFile()
+            if filepath:
+                ext = os.path.splitext(filepath)[1].lower()
+                if ext == ".py":
+                    self.sim.say("Python! Let me run that for you.", 3, urgent=True)
+                    self.sim.celebrate()
+                elif ext in (".png", ".jpg", ".jpeg"):
+                    self.sim.say("Ooh, a picture!", 3, urgent=True)
+                    self.sim.hearts(4)
+                elif ext == ".zip":
+                    self.sim.say("I'll hold onto this.", 3, urgent=True)
+                else:
+                    self.sim.say("What's this?", 2.5)
+                break
 
 
 # === END OF PART 2 ==========================================================
@@ -4089,6 +4280,11 @@ class SettingsDialog(QDialog):
         )
         form.addRow("Theme", self.theme_combo)
 
+        # Custom Color Picker
+        custom_color_btn = QPushButton("Pick Custom Accent Color...")
+        custom_color_btn.clicked.connect(self._pick_custom_color)
+        form.addRow("", custom_color_btn)
+
         # Size
         self.size_combo = QComboBox()
         for name, v in (("Small", 0.7), ("Medium", 1.0), ("Large", 1.4)):
@@ -4150,6 +4346,14 @@ class SettingsDialog(QDialog):
         form.addRow("", self.react_cb)
 
         return w
+
+    def _pick_custom_color(self):
+        from PySide6.QtWidgets import QColorDialog
+        color = QColorDialog.getColor()
+        if color.isValid():
+            # Save to config
+            self.app.cfg["custom_accent"] = (color.red(), color.green(), color.blue())
+            self.app.set_theme("custom")
 
     def _tab_behaviour(self) -> QWidget:
         w = QWidget()
@@ -4508,9 +4712,204 @@ class SettingsDialog(QDialog):
 
 
 # ============================================================================
-# DUCK DIALOG
+# DUCK DIALOG & SPEECH THREADS
 # ============================================================================
 
+import queue
+import json
+
+# --- Text-to-Speech Thread --------------------------------------------------
+class TTSThread(threading.Thread):
+    """Uses Windows Native SAPI via PowerShell to speak text offline."""
+    def __init__(self, text: str):
+        super().__init__(daemon=True)
+        self.text = text
+
+    def run(self):
+        try:
+            # Escape single quotes for PowerShell
+            safe_text = self.text.replace("'", "''")
+            # Use PowerShell's built-in System.Speech (Zero extra Python deps)
+            cmd = (
+                "Add-Type -AssemblyName System.Speech; "
+                "$speak = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                "$speak.Rate = 1; "
+                f"$speak.Speak('{safe_text}')"
+            )
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                creationflags=0x08000000 if IS_WIN else 0,  # CREATE_NO_WINDOW
+                capture_output=True,
+                timeout=30
+            )
+        except Exception:
+            logging.exception("TTS failed")
+
+# --- Speech-to-Text Thread (Vosk) -------------------------------------------
+class SpeechThread(threading.Thread):
+    def __init__(self, callback):
+        super().__init__(daemon=True)
+        self.callback = callback
+        self.q = queue.Queue()
+        self.running = True
+        self.is_processing = False
+        
+        if hasattr(sys, "_MEIPASS"):
+            model_path = str(Path(sys._MEIPASS) / "model")
+        else:
+            model_path = str(Path(__file__).parent / "model")
+            
+        try:
+            import vosk
+            self.model = vosk.Model(model_path)
+            self.rec = vosk.KaldiRecognizer(self.model, 16000)
+        except Exception as e:
+            logging.error("Vosk model failed: %s", e)
+            self.running = False
+
+    def run(self):
+        if not self.running:
+            return
+            
+        import sounddevice as sd
+
+        def callback(indata, frames, time, status):
+            self.q.put(bytes(indata))
+
+        try:
+            with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                                   channels=1, callback=callback):
+                while self.running:
+                    try:
+                        data = self.q.get(timeout=0.1)
+                        if self.rec.AcceptWaveform(data):
+                            result = json.loads(self.rec.Result())
+                            text = result.get("text", "")
+                            if text:
+                                self.callback(text)
+                    except queue.Empty:
+                        pass
+        except Exception:
+            logging.exception("SpeechThread audio failed")
+            
+        # --- FLUSH BUFFER ---
+        self.is_processing = True # Tell the UI we are processing
+        try:
+            final_result = json.loads(self.rec.FinalResult())
+            final_text = final_result.get("text", "")
+            if final_text:
+                self.callback(final_text)
+        except Exception:
+            pass
+        self.is_processing = False
+    """Listens to the microphone and transcribes using Vosk."""
+    def __init__(self, callback):
+        super().__init__(daemon=True)
+        self.callback = callback
+        self.q = queue.Queue()
+        self.running = True
+        
+        # Robust path resolution for PyInstaller
+        if hasattr(sys, "_MEIPASS"):
+            model_path = str(Path(sys._MEIPASS) / "model")
+        else:
+            model_path = str(Path(__file__).parent / "model")
+            
+        try:
+            import vosk
+            self.model = vosk.Model(model_path)
+            self.rec = vosk.KaldiRecognizer(self.model, 16000)
+        except Exception as e:
+            logging.error("Vosk model not found or failed to load. Speech disabled: %s", e)
+            self.running = False
+
+    def run(self):
+        if not self.running:
+            return
+            
+        import sounddevice as sd
+
+        def callback(indata, frames, time, status):
+            if status:
+                logging.warning("Sounddevice status: %s", status)
+            self.q.put(bytes(indata))
+
+        try:
+            with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                                   channels=1, callback=callback):
+                while self.running:
+                    try:
+                        data = self.q.get(timeout=0.1)
+                        if self.rec.AcceptWaveform(data):
+                            result = json.loads(self.rec.Result())
+                            text = result.get("text", "")
+                            if text:
+                                self.callback(text)
+                    except queue.Empty:
+                        pass
+        except Exception:
+            logging.exception("SpeechThread audio stream failed")
+            
+        # --- FLUSH BUFFER ---
+        # When the loop exits (user released the button), flush any 
+        # audio still sitting in Vosk's buffer.
+        try:
+            final_result = json.loads(self.rec.FinalResult())
+            final_text = final_result.get("text", "")
+            if final_text:
+                self.callback(final_text)
+        except Exception:
+            pass
+
+    def stop(self):
+        self.running = False
+        
+    """Listens to the microphone and transcribes using Vosk."""
+    def __init__(self, callback):
+        super().__init__(daemon=True)
+        self.callback = callback
+        self.q = queue.Queue()
+        self.running = True
+        if hasattr(sys, "_MEIPASS"):
+            model_path = str(Path(sys._MEIPASS) / "model")
+        else:
+            model_path = str(Path(__file__).parent / "model")
+        
+        try:
+            import vosk
+            self.model = vosk.Model(model_path)
+            self.rec = vosk.KaldiRecognizer(self.model, 16000)
+        except Exception as e:
+            logging.error("Vosk model not found or failed to load. Speech disabled: %s", e)
+            self.running = False
+
+    def run(self):
+        if not self.running:
+            return
+            
+        import sounddevice as sd
+
+        def callback(indata, frames, time, status):
+            self.q.put(bytes(indata))
+
+        try:
+            with sd.RawInputStream(samplerate=16000, blocksize=8000, dtype='int16',
+                                   channels=1, callback=callback):
+                while self.running:
+                    data = self.q.get()
+                    if self.rec.AcceptWaveform(data):
+                        result = json.loads(self.rec.Result())
+                        text = result.get("text", "")
+                        if text:
+                            self.callback(text)
+        except Exception:
+            logging.exception("SpeechThread audio stream failed")
+
+    def stop(self):
+        self.running = False
+
+
+# --- Duck Dialog -------------------------------------------------------------
 class DuckDialog(QDialog):
     """Rubber-duck debugging chat. Not a chatbot — a Socratic mirror."""
 
@@ -4525,21 +4924,22 @@ class DuckDialog(QDialog):
             | Qt.WindowType.CustomizeWindowHint,
         )
         self.setWindowTitle("Rubber duck debugging with Orbi")
-        self.setMinimumSize(480, 260)
+        self.setMinimumSize(480, 300)
         self.setStyleSheet(dialog_qss())
 
         self.on_send = on_send
         self.on_close = on_close
         self._closed = False
         self.lines: List[str] = []
+        self.speech_thread: Optional[SpeechThread] = None
+        self.tts_enabled = True
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 12, 12, 12)
 
         header = QLabel(
-            "Explain the problem out loud (well, in text). I'll ask the "
-            "questions you already know the answers to. Press Enter to "
-            "send, Esc when you're done."
+            "Explain the problem out loud. You can type or click the "
+            "microphone to speak. I'll ask the questions you already know the answers to."
         )
         header.setWordWrap(True)
         header.setStyleSheet("color: rgba(180,185,200,220); font-size: 11px;")
@@ -4555,11 +4955,28 @@ class DuckDialog(QDialog):
         self.edit.returnPressed.connect(self._send)
         lay.addWidget(self.edit)
 
+        # --- Bottom Controls Row ---
         row = QHBoxLayout()
+        
+        # Mic Button (Speech-to-Text)
+        self.mic_btn = QPushButton("🎤 Hold to Talk")
+        self.mic_btn.pressed.connect(self._start_speech)
+        self.mic_btn.released.connect(self._stop_speech)
+        row.addWidget(self.mic_btn)
+
+        # TTS Toggle Button
+        self.tts_btn = QPushButton("🔊 Voice: ON")
+        self.tts_btn.setCheckable(True)
+        self.tts_btn.setChecked(True)
+        self.tts_btn.toggled.connect(self._toggle_tts)
+        row.addWidget(self.tts_btn)
+
         row.addStretch(1)
+        
         done_btn = QPushButton("Done")
         done_btn.clicked.connect(self.close)
         row.addWidget(done_btn)
+        
         lay.addLayout(row)
 
         self._append_system(
@@ -4569,7 +4986,6 @@ class DuckDialog(QDialog):
     def _append_system(self, line: str) -> None:
         self.lines.append(line)
         self.transcript.setPlainText("\n\n".join(self.lines))
-        # scroll to bottom
         sb = self.transcript.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -4586,11 +5002,79 @@ class DuckDialog(QDialog):
 
     def show_reply(self, text: str) -> None:
         self._append_system("Orbi: " + text)
+        
+        # Trigger Text-to-Speech if enabled
+        if self.tts_enabled:
+            TTSThread(text).start()
+
+    def _toggle_tts(self, checked: bool) -> None:
+        self.tts_enabled = checked
+        if checked:
+            self.tts_btn.setText("🔊 Voice: ON")
+            TTSThread("Voice enabled").start()
+        else:
+            self.tts_btn.setText("🔇 Voice: OFF")
+
+    # --- Speech-to-Text Handling ---
+    def _start_speech(self) -> None:
+        if self.speech_thread and self.speech_thread.running:
+            return
+            
+        self.mic_btn.setText("🔴 Listening...")
+        self.edit.setPlaceholderText("Speak now...")
+        self.speech_thread = SpeechThread(self._on_speech_result)
+        self.speech_thread.start()
+        
+        # Start a timer to poll for text and show dots
+        self.speech_poll_timer = QTimer(self)
+        self.speech_poll_timer.timeout.connect(self._poll_speech_status)
+        self.speech_poll_timer.start(100)
+        
+        self._dots_counter = 0
+
+    def _poll_speech_status(self) -> None:
+        if not self.speech_thread:
+            return
+            
+        # Animate 3 dots if the thread is processing the final buffer
+        if self.speech_thread.is_processing:
+            self._dots_counter = (self._dots_counter + 1) % 4
+            dots = "." * self._dots_counter
+            self.edit.setPlaceholderText(f"Transcribing{dots}")
+        elif self.speech_thread.running:
+            self.edit.setPlaceholderText("Speak now...")
+
+    def _stop_speech(self) -> None:
+        if self.speech_thread:
+            self.speech_thread.stop() # This triggers the final flush
+            # We do NOT set self.speech_thread = None here.
+            # We let the thread finish and call _on_speech_result.
+
+    def _on_speech_result(self, text: str) -> None:
+        # This runs in the background thread. We MUST use QTimer to update UI.
+        QTimer.singleShot(0, lambda: self._handle_speech_ui(text))
+
+    def _handle_speech_ui(self, text: str) -> None:
+        if self.speech_poll_timer:
+            self.speech_poll_timer.stop()
+        self.speech_thread = None
+        
+        self.mic_btn.setText("🎤 Hold to Talk")
+        self.edit.setPlaceholderText("What's going wrong?")
+        
+        self.edit.setText(text)
+        self._send()
+
+    def _handle_speech_ui(self, text: str) -> None:
+        self.edit.setText(text)
+        self._send()
+        self._stop_speech()
 
     def reject(self) -> None:
         self.close()
 
     def closeEvent(self, e) -> None:  # noqa: N802
+        self._stop_speech()
         if not self._closed:
             self._closed = True
             try:
@@ -4598,7 +5082,6 @@ class DuckDialog(QDialog):
             except Exception:
                 logging.exception("duck on_close failed")
         e.accept()
-
 
 # ============================================================================
 # ACHIEVEMENTS DIALOG
@@ -5017,6 +5500,8 @@ class OrbiApp:
     # main tick
     # ------------------------------------------------------------------
     def tick(self) -> None:
+        if self.asleep:
+            return # Don't waste CPU if he's sleeping
         now = time.perf_counter()
         dt = now - self.last
         self.last = now
@@ -5032,6 +5517,13 @@ class OrbiApp:
             l, t, r = l / dpr, t / dpr, r / dpr
             if r - l >= 300 and t >= work[1]:
                 perch = (l, t, r)
+                
+            # UI Landing: If there's a search bar, prefer it!
+            if fg.get("input_rect"):
+                il, it, ir = fg["input_rect"]
+                il, it, ir = il / dpr, it / dpr, ir / dpr
+                if (ir - il) > 100:
+                    perch = (il, it, ir)
 
         typing = idle_seconds() < 1.5
         env = Env(work, (cur.x(), cur.y()), perch, typing=typing)
@@ -5063,6 +5555,11 @@ class OrbiApp:
         if key != self.fg_key:
             self.fg_key = key
             self.maybe_comment(self.fg)
+            
+            # --- Dance Mode Detection ---
+            media_apps = ("spotify.exe", "musicbee.exe", "foobar2000.exe")
+            is_media = self.fg["exe"] in media_apps or ("youtube" in self.fg["title"].lower())
+            self.sim.dancing = is_media and not self.sim.drowsy
         if self.stats:
             self.stats.note_foreground(self.fg["exe"], 0.4)
 
@@ -5408,6 +5905,23 @@ class OrbiApp:
         elif cmd == 'bored':
             if not self.asleep:
                 self.sim.set_mood("bored", 4.0)
+        elif cmd == "mood":
+            mood = (arg or "normal").strip().lower()
+            if mood not in MOOD_COLORS:
+                self.notify("Unknown mood: %s" % mood)
+                return
+            if self.asleep:
+                return
+            if mood == "happy":
+                self.sim.celebrate()
+            elif mood == "sad":
+                self.sim.sad()
+            elif mood == "love":
+                self.sim.love()
+            elif mood == "thinking":
+                self.sim.begin_think(dur=5.0)
+            else:
+                self.sim.set_mood(mood, 4.0)
 
     # ------------------------------------------------------------------
     # sleep / wake
@@ -5650,6 +6164,8 @@ class OrbiApp:
                 self.stats = None
 
     def set_theme(self, name: str) -> None:
+        if name == "custom" and "custom_accent" in self.cfg:
+            THEMES["custom"]["orange"] = tuple(self.cfg["custom_accent"])
         if name not in THEMES:
             return
         self.cfg["theme"] = name

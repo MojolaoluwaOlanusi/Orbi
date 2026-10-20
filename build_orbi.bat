@@ -67,9 +67,12 @@ if "%MISSING%"=="" (
 )
 
 REM ---------------------------------------------------------------------------
-REM 3. Clean old build artifacts
+REM 3. Kill running Orbi and clean old build artifacts
 REM ---------------------------------------------------------------------------
-echo [3/4] Cleaning old build artifacts...
+echo [3/4] Closing running Orbi and cleaning old build artifacts...
+taskkill /F /IM Orbi.exe /T >nul 2>&1
+timeout /t 1 /nobreak >nul
+
 if exist "%HERE%\build"     rmdir /s /q "%HERE%\build"
 if exist "%HERE%\Orbi"      rmdir /s /q "%HERE%\Orbi"
 if exist "%HERE%\Orbi.spec" del /q "%HERE%\Orbi.spec"
@@ -99,6 +102,12 @@ echo [4/4] Building Orbi.exe (this takes 1-3 minutes on first run)...
     --exclude-module PySide6.QtDataVisualization ^
     --exclude-module PySide6.QtDesigner ^
     --exclude-module PySide6.QtTest ^
+    --hidden-import vosk ^
+    --collect-all vosk ^
+    --hidden-import sounddevice ^
+    --collect-all sounddevice ^
+    --collect-binaries sounddevice ^
+    --add-data "%HERE%\model;model" ^
     "%HERE%\orbi.py"
 
 if errorlevel 1 (
